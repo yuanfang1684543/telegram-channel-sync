@@ -1,17 +1,16 @@
+from __future__ import annotations
 #!/usr/bin/env python3
 """
-Telegram 频道同步消息机器人 - 升级版 v2
-支持:
-  - 动态添加/删除频道映射（无需重启）
-  - 自定义文字替换规则
-  - 管理员白名单
-  - 持久化配置（config.json）
+Telegram 频道同步消息机器人 v2
+- 动态添加/删除频道映射
+- 自定义文字替换规则
+- 管理员白名单
+- 持久化配置 config.json
 """
 
 import os
 import json
 import logging
-from __future__ import annotations
 from pathlib import Path
 from telegram import Update
 from telegram.ext import (
@@ -36,7 +35,7 @@ if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN 环境变量未设置")
 
 ADMIN_IDS_ENV = os.getenv("ADMIN_IDS", "")
-ENV_ADMIN_IDS: set[int] = (
+ENV_ADMIN_IDS = (
     {int(x.strip()) for x in ADMIN_IDS_ENV.split(",") if x.strip()}
     if ADMIN_IDS_ENV else set()
 )
@@ -45,7 +44,7 @@ CONFIG_PATH = Path(os.getenv("CONFIG_PATH", "config.json"))
 
 
 # ── 配置管理 ──────────────────────────────────────────────────────────────────
-def load_config() -> dict:
+def load_config():
     if CONFIG_PATH.exists():
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -55,7 +54,7 @@ def load_config() -> dict:
     return {"channel_mappings": {}, "replace_rules": {}, "admins": []}
 
 
-def save_config(cfg: dict) -> None:
+def save_config(cfg):
     try:
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
@@ -63,15 +62,14 @@ def save_config(cfg: dict) -> None:
         logger.error(f"保存配置失败: {e}")
 
 
-config: dict = load_config()
+config = load_config()
 
-# 从环境变量同步初始频道配置
+# 从环境变量同步初始频道
 _src = os.getenv("SOURCE_CHANNEL_ID")
 _tgt = os.getenv("TARGET_CHANNEL_ID")
 if _src and _tgt and _src not in config["channel_mappings"]:
     config["channel_mappings"][_src] = _tgt
 
-# 从环境变量同步管理员
 for _aid in ENV_ADMIN_IDS:
     if _aid not in config["admins"]:
         config["admins"].append(_aid)
@@ -80,7 +78,7 @@ save_config(config)
 
 
 # ── 权限检查 ──────────────────────────────────────────────────────────────────
-def is_admin(user_id: int) -> bool:
+def is_admin(user_id):
     return user_id in config.get("admins", []) or user_id in ENV_ADMIN_IDS
 
 
@@ -96,7 +94,7 @@ def admin_only(func):
 
 
 # ── 工具函数 ──────────────────────────────────────────────────────────────────
-def apply_replace(text: str | None) -> str | None:
+def apply_replace(text):
     if not text:
         return text
     for old, new in config.get("replace_rules", {}).items():
@@ -104,7 +102,7 @@ def apply_replace(text: str | None) -> str | None:
     return text
 
 
-def get_mappings() -> dict[int, int]:
+def get_mappings():
     result = {}
     for k, v in config.get("channel_mappings", {}).items():
         try:
@@ -127,13 +125,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     if is_admin(uid):
         lines += [
-            "\n🔧 管理员命令（频道）",
+            "\n🔧 频道管理（管理员）",
             "/addchannel 源ID 目标ID  — 添加映射",
             "/removechannel 源ID      — 删除映射",
-            "\n🔤 管理员命令（替换规则）",
+            "\n🔤 替换规则（管理员）",
             "/addrule 原文 >> 替换文  — 添加规则",
             "/removerule 原文         — 删除规则",
-            "\n👮 管理员命令（权限）",
+            "\n👮 权限管理（管理员）",
             "/addadmin 用户ID         — 添加管理员",
             "/removeadmin 用户ID      — 删除管理员",
         ]
@@ -212,7 +210,6 @@ async def cmd_listrules(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     lines = ["🔤 文字替换规则:\n"]
     for i, (old, new) in enumerate(rules.items(), 1):
-        # 空字符串显示为 [删除]
         new_display = new if new else "[删除]"
         lines.append(f"{i}. 「{old}」→「{new_display}」")
     await update.message.reply_text("\n".join(lines))
@@ -220,28 +217,22 @@ async def cmd_listrules(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @admin_only
 async def cmd_addrule(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    用法: /addrule 原文 >> 替换文
-    若替换文为空则表示删除该词（如 /addrule 广告词 >> ）
-    """
     raw = update.message.text.split(None, 1)
     if len(raw) < 2 or ">>" not in raw[1]:
         await update.message.reply_text(
             "❌ 用法: /addrule 原文 >> 替换文\n\n"
             "示例:\n"
             "  /addrule 旧名字 >> 新名字\n"
-            "  /addrule 广告词 >>          (替换为空=删除该词)\n"
+            "  /addrule 广告词 >>          （右侧留空 = 删除该词）\n"
             "  /addrule http://old.com >> http://new.com"
         )
         return
     parts = raw[1].split(">>", 1)
     old_text = parts[0].strip()
     new_text = parts[1].strip()
-
     if not old_text:
         await update.message.reply_text("❌ 原文不能为空。")
         return
-
     config["replace_rules"][old_text] = new_text
     save_config(config)
     new_display = new_text if new_text else "[删除该词]"
@@ -259,7 +250,8 @@ async def cmd_removerule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if old_text in config["replace_rules"]:
         new_text = config["replace_rules"].pop(old_text)
         save_config(config)
-        await update.message.reply_text(f"🗑 已删除规则:\n「{old_text}」→「{new_text}」")
+        new_display = new_text if new_text else "[删除该词]"
+        await update.message.reply_text(f"🗑 已删除规则:\n「{old_text}」→「{new_display}」")
     else:
         await update.message.reply_text(f"⚠️ 未找到规则「{old_text}」。")
 
@@ -306,7 +298,7 @@ async def cmd_removeadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── 消息转发核心 ──────────────────────────────────────────────────────────────
 
-async def forward_message(context: ContextTypes.DEFAULT_TYPE, message, target_id: int):
+async def forward_message(context: ContextTypes.DEFAULT_TYPE, message, target_id):
     has_rules = bool(config.get("replace_rules"))
 
     if message.text:
@@ -381,16 +373,12 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
     message = update.channel_post
     if not message:
         return
-
     mappings = get_mappings()
     source_id = message.chat_id
-
     if source_id not in mappings:
         return
-
     target_id = mappings[source_id]
     logger.info(f"[转发] {source_id} → {target_id} | msg_id={message.message_id}")
-
     try:
         await forward_message(context, message, target_id)
     except TelegramError as e:
