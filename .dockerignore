@@ -1,0 +1,54 @@
+# Git 相关
+.git
+.gitignore
+.gitattributes
+
+# 环境文件
+.env
+.env.local
+.env*.local
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 日志和临时文件
+*.log
+logs/
+tmp/
+
+# Railway
+.railway/
+
+# 其他
+.cache/
+node_modules/

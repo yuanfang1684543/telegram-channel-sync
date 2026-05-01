@@ -1,0 +1,14 @@
+{
+  "build": {
+    "builder": "NIXPACKS"
+  },
+  "deploy": {
+    "numReplicas": 1,
+    "startCommand": "python main.py",
+    "restartPolicyMaxRetries": 10,
+    "restartPolicyWindowMs": 60000
+  },
+  "telemetry": {
+    "capturePerformance": true
+  }
+}

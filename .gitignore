@@ -1,0 +1,38 @@
+# 环境变量文件
+.env
+.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+venv/
+ENV/
+env/
+build/
+dist/
+*.egg-info/
+
+# 系统/工具缓存
+.cache/
+.local/
+.config/
+.npm/
+.npm-global/
+.npmrc
+.wget-hsts
+node_modules/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# 日志
+*.log
+logs/
+sync_log.json
+
+# Railway
+.railway/
