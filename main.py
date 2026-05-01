@@ -11,6 +11,7 @@ Telegram 频道同步消息机器人 - 升级版 v2
 import os
 import json
 import logging
+from __future__ import annotations
 from pathlib import Path
 from telegram import Update
 from telegram.ext import (
