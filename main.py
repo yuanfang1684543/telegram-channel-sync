@@ -1,13 +1,12 @@
 from __future__ import annotations
 """
-Telegram 频道同步机器人 v7
+Telegram 频道同步机器人 v8
 - 多频道映射 + 自动识别频道
 - 首次引导向导
 - 全内联按键设置面板
 - 媒体组（相册）转发
 - 消息编辑同步
 - 洪水控制自动重试
-- Google Drive 备份 + Gmail 日报 & 告警
 """
 import asyncio
 import json
@@ -21,7 +20,7 @@ from pathlib import Path
 from telegram import (
     Chat, ChatMemberAdministrator, ChatMemberOwner,
     InlineKeyboardButton, InlineKeyboardMarkup,
-    InputMediaAudio, InputMediaDocument, InputMediaPhoto, InputMediaVideo,
+    InputMediaPhoto, InputMediaVideo,
     Update,
 )
 from telegram.error import RetryAfter, TelegramError
@@ -29,8 +28,6 @@ from telegram.ext import (
     Application, CallbackQueryHandler, ChatMemberHandler,
     CommandHandler, ContextTypes, MessageHandler, filters,
 )
-
-import google_services as gs
 
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -43,7 +40,7 @@ ENV_ADMIN_IDS: set[int] = {
     int(x) for x in os.getenv("ADMIN_IDS", "").split(",")
     if x.strip().lstrip("-").isdigit()
 }
-CONFIG_PATH = Path(os.getenv("CONFIG_PATH", "config.json"))
+CONFIG_PATH  = Path(os.getenv("CONFIG_PATH",  "config.json"))
 MSG_MAP_PATH = Path(os.getenv("MSG_MAP_PATH", "msg_map.json"))
 
 
@@ -56,7 +53,6 @@ class S:
     ADMIN_ID = "admin_id"
     AD_TEXT = "ad_text"; AD_INTERVAL = "ad_interval"
     AD_CHANNELS = "ad_channels"; AD_BUTTONS = "ad_buttons"
-    G_FOLDER = "g_folder"; G_EMAIL = "g_email"; G_HOUR = "g_hour"
 
 
 # ── 配置管理 ──────────────────────────────────────────────────────────────────
@@ -68,14 +64,6 @@ def _default_config() -> dict:
         "replace_rules": {},
         "admins": [],
         "ads": [],
-        "google": {
-            "drive_backup": False,
-            "daily_report": False,
-            "error_alert": False,
-            "drive_folder_id": "",
-            "notify_email": "",
-            "report_hour": 8,
-        },
     }
 
 
@@ -139,7 +127,6 @@ _msg_map: dict = _load_msg_map()
 
 def _store_msg(src_chat: int, src_msg: int, tgt_chat: int, tgt_msg: int) -> None:
     _msg_map[f"{src_chat}:{src_msg}"] = f"{tgt_chat}:{tgt_msg}"
-    # 超过 20000 条时清理最早的一半
     if len(_msg_map) > 20000:
         keep = dict(list(_msg_map.items())[10000:])
         _msg_map.clear()
@@ -257,7 +244,6 @@ def cancel_kb(back: str = "cb:cancel") -> InlineKeyboardMarkup:
 
 
 def esc(text: str) -> str:
-    """HTML 转义"""
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
@@ -294,7 +280,6 @@ async def _flush_media_group(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     target_id = mappings[src_chat_id]
     cap = apply_replace(messages[0].caption)
 
-    # 仅 photo/video 可混合为媒体组；audio/document 各自同质组
     media_list = []
     group_msgs = []
     for i, msg in enumerate(messages):
@@ -318,7 +303,6 @@ async def _flush_media_group(ctx: ContextTypes.DEFAULT_TYPE) -> None:
                     _store_msg(src_chat_id, src_msg.message_id, target_id, tgt_msg.message_id)
                 _inc_fwd()
                 logger.info(f"[相册] {src_chat_id}→{target_id} {len(sent_list)} 张")
-            # 其余非 photo/video 消息单独转发
             for msg in messages:
                 if msg not in group_msgs:
                     await _forward_one(ctx, msg, src_chat_id, target_id)
@@ -326,9 +310,7 @@ async def _flush_media_group(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         except TelegramError as e:
             _inc_err()
             logger.error(f"相册转发失败，降级单条: {e}")
-            await _maybe_alert(ctx, src_chat_id, str(e))
 
-    # 降级：逐条转发
     for msg in messages:
         await _forward_one(ctx, msg, src_chat_id, target_id)
 
@@ -342,75 +324,26 @@ async def _forward_one(ctx, msg, src_chat_id: int, target_id: int) -> None:
     except TelegramError as e:
         _inc_err()
         logger.error(f"转发失败: {e}")
-        await _maybe_alert(ctx, src_chat_id, str(e))
-
-
-# ━━━ 告警辅助 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-async def _maybe_alert(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, error: str) -> None:
-    gcfg = cfg["google"]
-    if gcfg.get("error_alert") and gcfg.get("notify_email") and gs.gmail_is_configured():
-        gs.gmail_send_alert(gcfg["notify_email"], "消息转发失败", f"频道:{chat_id}\n错误:{error}")
 
 
 # ━━━ 面板构建 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def main_menu_text() -> str:
     m = get_mappings()
     active_ads = sum(1 for a in cfg["ads"] if a.get("enabled", True))
-    drive_s = "✅" if gs.drive_is_configured() else "❌"
-    gmail_s = "✅" if gs.gmail_is_configured() else "❌"
     return (
         "⚙️ <b>设置面板</b>\n\n"
         f"📡 频道映射: {len(m)} 条  🤖 已知: {len(cfg['known_channels'])}\n"
         f"🔤 替换规则: {len(cfg['replace_rules'])} 条\n"
-        f"📢 广告: {active_ads}/{len(cfg['ads'])}\n"
-        f"☁️ Drive:{drive_s}  📧 Gmail:{gmail_s}"
+        f"📢 广告: {active_ads}/{len(cfg['ads'])}"
     )
 
 
 MAIN_MENU_KB = kb(
-    [btn("📡 频道映射", "menu:ch"),    btn("🤖 已知频道",  "menu:known")],
-    [btn("🔤 替换规则", "menu:rule"),   btn("📢 定时广告",  "menu:ad")],
-    [btn("👮 管理员",   "menu:admin"),  btn("🔗 Google集成", "menu:google")],
-    [btn("📊 运行状态", "cb:status"),   btn("❌ 关闭",       "cb:close")],
+    [btn("📡 频道映射", "menu:ch"),   btn("🤖 已知频道", "menu:known")],
+    [btn("🔤 替换规则", "menu:rule"),  btn("📢 定时广告",  "menu:ad")],
+    [btn("👮 管理员",   "menu:admin"), btn("📊 运行状态",  "cb:status")],
+    [btn("❌ 关闭",     "cb:close")],
 )
-
-
-def google_panel() -> tuple[str, InlineKeyboardMarkup]:
-    gcfg = cfg["google"]
-    bk = "✅" if gcfg.get("drive_backup") else "⭕"
-    rp = "✅" if gcfg.get("daily_report") else "⭕"
-    al = "✅" if gcfg.get("error_alert")  else "⭕"
-    folder = esc(gcfg.get("drive_folder_id") or "未设置")
-    email  = esc(gcfg.get("notify_email") or "未设置")
-    hour   = gcfg.get("report_hour", 8)
-    drive_s = "✅ 已连接" if gs.drive_is_configured() else "❌ 未配置"
-    gmail_s = "✅ 已连接" if gs.gmail_is_configured() else "❌ 未配置"
-    txt = (
-        "🔗 <b>Google 集成</b>\n\n"
-        f"☁️ Google Drive: {drive_s}\n"
-        f"📧 Gmail SMTP: {gmail_s}\n\n"
-        "<b>Drive 功能</b>\n"
-        f"• 自动备份: {bk}  文件夹: <code>{folder[:24]}</code>\n\n"
-        "<b>Gmail 功能</b>\n"
-        f"• 每日报告: {rp}  邮箱: <code>{email}</code>  时间: {hour:02d}:00\n"
-        f"• 错误告警: {al}\n\n"
-        "<i>在环境变量中配置：</i>\n"
-        "<code>GOOGLE_SERVICE_ACCOUNT_JSON</code>  "
-        "<code>GMAIL_USER</code>  <code>GMAIL_APP_PASSWORD</code>"
-    )
-    mk = kb(
-        [btn(f"☁️ 自动备份 {bk}", "g:toggle_backup"),
-         btn("📁 设置文件夹", "g:set_folder")],
-        [btn(f"📧 每日报告 {rp}", "g:toggle_report"),
-         btn("📮 设置邮箱", "g:set_email")],
-        [btn(f"🚨 错误告警 {al}", "g:toggle_alert"),
-         btn(f"🕐 报告时间 {hour:02d}:00", "g:set_hour")],
-        [btn("💾 立即备份", "g:backup_now"),
-         btn("📤 立即发报告", "g:report_now")],
-        [btn("📋 Drive文件列表", "g:list_files")],
-        [btn("◀ 返回", "menu:main")],
-    )
-    return txt, mk
 
 
 def ch_panel() -> tuple[str, InlineKeyboardMarkup]:
@@ -687,130 +620,8 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await q.answer("⛔ 无权限", show_alert=True)
         return
 
-    gcfg = cfg["google"]
-
-    # ── Google 面板 ───────────────────────────────────────────────────────────
-    if data == "menu:google":
-        t, mk = google_panel()
-        await q.edit_message_text(t, parse_mode="HTML", reply_markup=mk)
-
-    elif data == "g:toggle_backup":
-        gcfg["drive_backup"] = not gcfg.get("drive_backup")
-        save_config()
-        schedule_google_jobs(ctx.application)
-        t, mk = google_panel()
-        await q.edit_message_text(t, parse_mode="HTML", reply_markup=mk)
-
-    elif data == "g:toggle_report":
-        gcfg["daily_report"] = not gcfg.get("daily_report")
-        save_config()
-        schedule_google_jobs(ctx.application)
-        t, mk = google_panel()
-        await q.edit_message_text(t, parse_mode="HTML", reply_markup=mk)
-
-    elif data == "g:toggle_alert":
-        gcfg["error_alert"] = not gcfg.get("error_alert")
-        save_config()
-        t, mk = google_panel()
-        await q.edit_message_text(t, parse_mode="HTML", reply_markup=mk)
-
-    elif data == "g:set_folder":
-        ud["state"] = S.G_FOLDER
-        await q.edit_message_text(
-            "📁 <b>设置 Drive 文件夹</b>\n\n发送文件夹 ID\n（Drive 地址栏最后一段字符串）",
-            parse_mode="HTML", reply_markup=cancel_kb("menu:google"),
-        )
-
-    elif data == "g:set_email":
-        ud["state"] = S.G_EMAIL
-        await q.edit_message_text(
-            "📮 <b>设置通知邮箱</b>\n\n发送接收报告的 Gmail 地址：",
-            parse_mode="HTML", reply_markup=cancel_kb("menu:google"),
-        )
-
-    elif data == "g:set_hour":
-        ud["state"] = S.G_HOUR
-        await q.edit_message_text(
-            "🕐 <b>报告发送时间</b>\n\n发送小时数（0-23）：",
-            parse_mode="HTML", reply_markup=cancel_kb("menu:google"),
-        )
-
-    elif data == "g:backup_now":
-        await q.edit_message_text("⏳ 正在备份…")
-        await _do_backup(ctx)
-        t, mk = google_panel()
-        await q.edit_message_text(t, parse_mode="HTML", reply_markup=mk)
-
-    elif data == "g:report_now":
-        await q.edit_message_text("⏳ 正在发送报告…")
-        await _do_report(ctx)
-        t, mk = google_panel()
-        await q.edit_message_text(t, parse_mode="HTML", reply_markup=mk)
-
-    elif data == "g:list_files":
-        files = gs.drive_list_files(gcfg.get("drive_folder_id") or None)
-        if not files:
-            await q.edit_message_text(
-                "📋 Drive 暂无文件（或未配置服务账号）",
-                reply_markup=kb([btn("◀ 返回", "menu:google")]),
-            )
-            return
-        rows = [
-            [InlineKeyboardButton(
-                f"📄 {f['name'][:22]}",
-                url=f.get("webViewLink", "https://drive.google.com"),
-            )]
-            for f in files[:8]
-        ]
-        rows.append([btn("🗑 清理旧备份(保留5个)", "g:clean"), btn("◀ 返回", "menu:google")])
-        lines = ["📋 <b>Drive 文件</b>\n"] + [
-            f"• {esc(f['name'])} <i>{f.get('modifiedTime', '')[:10]}</i>"
-            for f in files[:8]
-        ]
-        await q.edit_message_text(
-            "\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows),
-        )
-
-    elif data == "g:clean":
-        files = gs.drive_list_files(gcfg.get("drive_folder_id") or None)
-        deleted = sum(1 for f in files[5:] if gs.drive_delete_file(f["id"]))
-        await q.edit_message_text(
-            f"🗑 已删除 {deleted} 个旧文件",
-            reply_markup=kb([btn("◀ 返回", "menu:google")]),
-        )
-
-    # ── 向导 ──────────────────────────────────────────────────────────────────
-    elif data == "wiz:skip_admin":
-        await wiz_source(q, ud, edit=True)
-    elif data == "wiz:back_admin":
-        await wiz_admin(q, ud, edit=True)
-    elif data == "wiz:back_source":
-        await wiz_source(q, ud, edit=True)
-    elif data.startswith("wiz:src:"):
-        await wiz_target(q, ud, data[8:], edit=True)
-    elif data.startswith("wiz:tgt:"):
-        src = ud.get("draft", {}).get("wiz_src", "")
-        if src:
-            await wiz_confirm(q, ud, src, data[8:], edit=True)
-    elif data.startswith("wiz:confirm:"):
-        _, _, src, tgt = data.split(":", 3)
-        cfg["channel_mappings"][src] = tgt
-        for cid, role in [(src, "src"), (tgt, "tgt")]:
-            cfg["known_channels"].setdefault(cid, {})["role"] = role
-        cfg["setup_complete"] = True
-        save_config()
-        ud["state"] = S.IDLE
-        await q.edit_message_text(
-            f"🎉 <b>设置完成！</b>\n\n"
-            f"📤 源: <code>{esc(ch_label(int(src)))}</code>\n"
-            f"📥 目标: <code>{esc(ch_label(int(tgt)))}</code>\n\n"
-            "机器人开始同步消息。",
-            parse_mode="HTML",
-            reply_markup=kb([btn("⚙️ 打开设置", "menu:main")]),
-        )
-
     # ── 主菜单 ────────────────────────────────────────────────────────────────
-    elif data == "menu:main":
+    if data == "menu:main":
         ud["state"] = S.IDLE
         await q.edit_message_text(main_menu_text(), parse_mode="HTML", reply_markup=MAIN_MENU_KB)
     elif data == "menu:ch":
@@ -852,6 +663,36 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     elif data == "cb:cancel":
         ud["state"] = S.IDLE
         await q.edit_message_text(main_menu_text(), parse_mode="HTML", reply_markup=MAIN_MENU_KB)
+
+    # ── 向导 ──────────────────────────────────────────────────────────────────
+    elif data == "wiz:skip_admin":
+        await wiz_source(q, ud, edit=True)
+    elif data == "wiz:back_admin":
+        await wiz_admin(q, ud, edit=True)
+    elif data == "wiz:back_source":
+        await wiz_source(q, ud, edit=True)
+    elif data.startswith("wiz:src:"):
+        await wiz_target(q, ud, data[8:], edit=True)
+    elif data.startswith("wiz:tgt:"):
+        src = ud.get("draft", {}).get("wiz_src", "")
+        if src:
+            await wiz_confirm(q, ud, src, data[8:], edit=True)
+    elif data.startswith("wiz:confirm:"):
+        _, _, src, tgt = data.split(":", 3)
+        cfg["channel_mappings"][src] = tgt
+        for cid, role in [(src, "src"), (tgt, "tgt")]:
+            cfg["known_channels"].setdefault(cid, {})["role"] = role
+        cfg["setup_complete"] = True
+        save_config()
+        ud["state"] = S.IDLE
+        await q.edit_message_text(
+            f"🎉 <b>设置完成！</b>\n\n"
+            f"📤 源: <code>{esc(ch_label(int(src)))}</code>\n"
+            f"📥 目标: <code>{esc(ch_label(int(tgt)))}</code>\n\n"
+            "机器人开始同步消息。",
+            parse_mode="HTML",
+            reply_markup=kb([btn("⚙️ 打开设置", "menu:main")]),
+        )
 
     # ── 频道映射操作 ──────────────────────────────────────────────────────────
     elif data == "ch:add":
@@ -1209,45 +1050,6 @@ async def handle_private_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
             ),
         )
 
-    # ── Google 输入 ───────────────────────────────────────────────────────────
-    elif state == S.G_FOLDER:
-        cfg["google"]["drive_folder_id"] = text
-        save_config()
-        ud["state"] = S.IDLE
-        await msg.reply_text(
-            "✅ Drive 文件夹已设置",
-            reply_markup=back_kb(("🔗 Google集成", "menu:google")),
-        )
-
-    elif state == S.G_EMAIL:
-        if "@" not in text:
-            await msg.reply_text("❌ 请输入有效邮箱")
-            return
-        cfg["google"]["notify_email"] = text
-        save_config()
-        ud["state"] = S.IDLE
-        await msg.reply_text(
-            f"✅ 通知邮箱: <code>{esc(text)}</code>",
-            parse_mode="HTML",
-            reply_markup=back_kb(("🔗 Google集成", "menu:google")),
-        )
-
-    elif state == S.G_HOUR:
-        try:
-            h = int(text)
-            assert 0 <= h <= 23
-        except (ValueError, AssertionError):
-            await msg.reply_text("❌ 请输入 0-23")
-            return
-        cfg["google"]["report_hour"] = h
-        save_config()
-        ud["state"] = S.IDLE
-        schedule_google_jobs(ctx.application)
-        await msg.reply_text(
-            f"✅ 报告时间: {h:02d}:00",
-            reply_markup=back_kb(("🔗 Google集成", "menu:google")),
-        )
-
 
 # ━━━ 广告任务 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 async def _save_ad(app: Application, q, ud: dict, ad_id: str, buttons: list) -> None:
@@ -1315,67 +1117,11 @@ async def _send_ad(ctx: ContextTypes.DEFAULT_TYPE) -> None:
             _inc_err()
 
 
-# ━━━ Google 定时任务 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-async def _do_backup(ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not gs.drive_is_configured():
-        return
-    gcfg = cfg["google"]
-    folder = gcfg.get("drive_folder_id") or None
-    now = datetime.now().strftime("%Y%m%d_%H%M")
-    fid = gs.drive_upload_text(
-        json.dumps(cfg, ensure_ascii=False, indent=2),
-        f"tg_config_{now}.json",
-        folder,
-    )
-    if fid:
-        logger.info(f"Drive 备份完成: {fid}")
-
-
-async def _do_report(ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    gcfg = cfg["google"]
-    to = gcfg.get("notify_email", "")
-    if not to or not gs.gmail_is_configured():
-        return
-    _reset_daily()
-    m = get_mappings()
-    gs.gmail_send_report(to, {
-        "mappings":   len(m),
-        "forwarded":  _daily["forwarded"],
-        "errors":     _daily["errors"],
-        "ads_active": sum(1 for a in cfg["ads"] if a.get("enabled", True)),
-        "ads_total":  len(cfg["ads"]),
-        "rules":      len(cfg["replace_rules"]),
-    })
-
-
-async def job_daily(ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    await _do_report(ctx)
-    if cfg["google"].get("drive_backup"):
-        await _do_backup(ctx)
-
-
-async def job_backup(ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if cfg["google"].get("drive_backup"):
-        await _do_backup(ctx)
-
-
-def schedule_google_jobs(app: Application) -> None:
-    for name in ("daily_report", "drive_backup"):
-        for job in app.job_queue.get_jobs_by_name(name):
-            job.schedule_removal()
-    gcfg = cfg["google"]
-    hour = gcfg.get("report_hour", 8)
-    if gcfg.get("daily_report") or gcfg.get("drive_backup"):
-        app.job_queue.run_daily(job_daily, time=dtime(hour=hour, minute=0), name="daily_report")
-    if gcfg.get("drive_backup"):
-        app.job_queue.run_repeating(job_backup, interval=6 * 3600, first=300, name="drive_backup")
-
-
 # ━━━ 消息转发 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 async def _forward_single(ctx: ContextTypes.DEFAULT_TYPE, msg, target: int) -> int | None:
     """转发单条消息，返回目标消息 ID；不支持的类型返回 None。"""
     has_rules = bool(cfg["replace_rules"])
-    cap = apply_replace(msg.caption)
+    cap  = apply_replace(msg.caption)
     ent  = msg.entities if not has_rules else None
     cent = msg.caption_entities if not has_rules else None
 
@@ -1516,7 +1262,6 @@ async def handle_channel_post(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
     except TelegramError as e:
         _inc_err()
         logger.error(f"转发失败 {msg.chat_id}→{target}: {e}")
-        await _maybe_alert(ctx, msg.chat_id, str(e))
 
 
 async def handle_edited_channel_post(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1567,7 +1312,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await wiz_admin(update.message, ctx.user_data)
     else:
         await update.message.reply_text(
-            "👋 <b>Telegram 频道同步机器人 v7</b>\n\n"
+            "👋 <b>Telegram 频道同步机器人 v8</b>\n\n"
             "/settings — 打开设置面板\n"
             "/status — 查看运行状态\n"
             "/help — 帮助信息",
@@ -1601,8 +1346,6 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"📡 映射:{len(m)}  🤖 已知:{len(cfg['known_channels'])}\n"
         f"🔤 规则:{len(cfg['replace_rules'])}  "
         f"📢 广告:{sum(1 for a in cfg['ads'] if a.get('enabled', True))}/{len(cfg['ads'])}\n"
-        f"☁️ Drive:{'✅' if gs.drive_is_configured() else '❌'}  "
-        f"📧 Gmail:{'✅' if gs.gmail_is_configured() else '❌'}\n"
         f"📨 今日转发:{_daily['forwarded']}  ❌ 失败:{_daily['errors']}",
         parse_mode="HTML",
     )
@@ -1627,9 +1370,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "• 定时广告推送（含内联按钮）\n"
         "• 消息编辑同步\n"
         "• 媒体组完整转发\n"
-        "• 洪水控制自动重试\n"
-        "• Google Drive 自动备份\n"
-        "• Gmail 每日报告 &amp; 错误告警",
+        "• 洪水控制自动重试",
         parse_mode="HTML",
     )
 
@@ -1643,12 +1384,10 @@ async def _post_init(app: Application) -> None:
     for ad in cfg.get("ads", []):
         if ad.get("enabled", True):
             reschedule_ad(app, ad)
-    schedule_google_jobs(app)
     logger.info(
-        f"🚀 启动完成 | 映射:{len(get_mappings())}  已知:{len(cfg.get('known_channels', {}))}"
-        f"  广告:{len(cfg.get('ads', []))}  "
-        f"Drive:{'✅' if gs.drive_is_configured() else '❌'}  "
-        f"Gmail:{'✅' if gs.gmail_is_configured() else '❌'}"
+        f"🚀 启动完成 | 映射:{len(get_mappings())}  "
+        f"已知:{len(cfg.get('known_channels', {}))}  "
+        f"广告:{len(cfg.get('ads', []))}"
     )
 
 
